@@ -24,9 +24,13 @@ typedef struct PCB {
     int             priority;           // process's priority
     P1_State        state;              // state of the PCB
     // more fields here
+    int             parent              // stores parent id
+    int             *children;          // array of children processes
+    int             *deadChildren;      // list of children that have quit
 } PCB;
 
 static PCB processTable[P1_MAXPROC];   // the process table
+
 
 void P1ProcInit(void)
 {
@@ -60,7 +64,7 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
 
 //-----------------------------------Check all parameters-------------------------------------------------//
     // make sure valid priority 
-    if(priority != 1 || priority != 2 || priority != 3 || priority != 4 || priority != 5 || priority != 6){
+    if(priority < 1 || priority > 6){
         return P1_INVALID_PRIORITY; 
     }
 
@@ -109,18 +113,21 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
 
     // TODO
     // allocate and initialize PCB (Process Control Block)
-    // Implement naming convention (difference between pid and cid?)
-    // init names and verify that the above checks work
-    processTable[pid].name = name;
+    processTable[pid]].name = name;
 
     // if this is the first process or this process's priority is higher than the 
     // currently running process call P1Dispatch(FALSE)
     // first process is process 6. Everything else is between 1-5 and 1 is highest priority
-    if(priority == 6){
+    if(priority == 6 && PROC_SIX == 0){
         // launch first process
         PROC_SIX = 1;
         P1Dispatch(FALSE);
     }
+    else if(PROC_SIX == 0){
+        PROC_SIX = 1;
+        P1Dispatch(FALSE);
+    }
+    // what do we do if process is not 6 and is not first process?
 
     // re-enable interrupts if they were previously enabled
     P1EnableInterrupts();
@@ -130,11 +137,21 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
 // TODO
 void P1_Quit(int status) {
     // check for kernel mode
+    checkMode();
     // disable interrupts
+    P1DisableInterrupts();
     // remove from ready queue, set status to P1_STATE_QUIT
-    // if first process verify it doesn't have children, otherwise give children to first process
+    // TODO: Make queue
+    // TODO: Get current ID
+    // if first process verify it doesn't have children, otherwise give children 
+    // to first process
+
+    // Store first process as a head so we can always access it?
+
     // add ourself to list of our parent's children that have quit
+    processTable[processTable[currentCid].parent].deadChildren = malloc(sizeof(int));
     // if parent is in state P1_STATE_JOINING set its state to P1_STATE_READY
+
     P1Dispatch(FALSE);
     // should never get here
     assert(0);
