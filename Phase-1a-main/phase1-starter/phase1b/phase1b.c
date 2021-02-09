@@ -34,6 +34,7 @@ void P1ProcInit(void)
     for (int i = 0; i < P1_MAXPROC; i++) {
         processTable[i].state = P1_STATE_FREE;
         // initialize the rest of the PCB
+        processTable[i].cid = i;
     }
     // initialize everything else
 
@@ -98,12 +99,19 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
 
     // create a context using P1ContextCreate
     // TODO this returns a cid, it must be valid number (between 0 and P1_MAXPROC)
-    P1ContextCreate(func,arg,stacksize,pid);
+    int checker = P1ContextCreate(func,arg,stacksize,pid);
+    if(checker == P1_TOO_MANY_CONTEXTS){
+        // throw error
+    }
+    else if(checker == P1_INVALID_STACK){
+        // throw error
+    }
 
     // TODO
     // allocate and initialize PCB (Process Control Block)
     // Implement naming convention (difference between pid and cid?)
-    // init names and varify that the above checks work
+    // init names and verify that the above checks work
+    processTable[pid].name = name;
 
     // if this is the first process or this process's priority is higher than the 
     // currently running process call P1Dispatch(FALSE)
