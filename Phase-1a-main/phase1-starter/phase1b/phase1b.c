@@ -13,9 +13,15 @@ James Brechtel and Zachery Braaten-Schuettpelz
 
 void checkMode();
 void illegalAction();
+void func_wrapper(int (*func)(void*), void *arg);
 
 // flag to check if the first process has started
 int PROC_SIX = 0;
+
+typedef struct Zombie{
+    int             cid;
+    int             *next;
+}
 
 typedef struct PCB {
     int             cid;                // context's ID
@@ -24,9 +30,13 @@ typedef struct PCB {
     int             priority;           // process's priority
     P1_State        state;              // state of the PCB
     // more fields here
-    int             parent              // stores parent id
-    int             *children;          // array of children processes
-    int             *deadChildren;      // list of children that have quit
+    int             parent;             // stores parent id
+    int             children[P1_MAXPROC];          // array of children processes
+    int             numChildren;
+    Zombie          *zombies;
+    int             created;            // lets us know if the context exists
+    int             status;             // No clue what it does
+    void            (*func)(void *);
 } PCB;
 
 static PCB processTable[P1_MAXPROC];   // the process table
@@ -39,13 +49,18 @@ void P1ProcInit(void)
         processTable[i].state = P1_STATE_FREE;
         // initialize the rest of the PCB
         processTable[i].cid = i;
+        processTable[i].numChildren = 0;
+        processTable[i].created = 0;
+        for(int j = 0; j < P1_MAXPROC; j++){
+            processTable[i].children[j] = -1;
+        }
     }
     // initialize everything else
 
 }
 
 int P1_GetPid(void) {
-    return 0;
+    return currentCid;
 }
 
 
@@ -53,14 +68,12 @@ int P1_GetPid(void) {
 // priority. 
 int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priority, int *pid ) {
     int result = P1_SUCCESS;
+    int status;
     int interruptFlag = 0;
-
     // check for kernel mode
     checkMode();
-
     // disable interrupts CHILDREN NEED TO RUN INTERRUPTS
     P1DisableInterrupts();
-
 
 //-----------------------------------Check all parameters-------------------------------------------------//
     // make sure valid priority 
@@ -69,7 +82,11 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
     }
 
     // priority 6 can only occur once
-    if(priority == 6 || PROC_SIX == 1){
+    if(priority == 6 && PROC_SIX == 1){
+        return P1_INVALID_PRIORITY;
+    }
+
+    if(priority != 6 && PROC_SIX == 0){
         return P1_INVALID_PRIORITY;
     }
 
@@ -102,8 +119,8 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
 //----------------------------------------------------------------------------------------------------------//
 
     // create a context using P1ContextCreate
-    // TODO this returns a cid, it must be valid number (between 0 and P1_MAXPROC)
-    int checker = P1ContextCreate(func,arg,stacksize,pid);
+    processTable[pid].func = func;
+    int checker = P1ContextCreate(func_wrapper,arg,stacksize,pid);
     if(checker == P1_TOO_MANY_CONTEXTS){
         // throw error
     }
@@ -111,9 +128,18 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
         // throw error
     }
 
-    // TODO
     // allocate and initialize PCB (Process Control Block)
-    processTable[pid]].name = name;
+    processTable[pid].name = name;
+    processTable[pid].priority = priority;
+    processTable[pid].parent = currentCid;
+    // index for children is the number of children it has.
+    processTable[currentCid].children[processTable[currentCid].numChildren] = pid;
+    processTable[pid].numChildren = 0;
+    processTable[pid].created = 1;
+    status = USLOSS_DeviceInput(USLOSS_CLOCK_DEV, 0, &processTable[pid].cpuTime);
+    if (status != USLOSS_DEV_OK) {
+        USLOSS_Halt(status);
+    } 
 
     // if this is the first process or this process's priority is higher than the 
     // currently running process call P1Dispatch(FALSE)
@@ -121,14 +147,14 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
     if(priority == 6 && PROC_SIX == 0){
         // launch first process
         PROC_SIX = 1;
+        processTable[currentCid].parent = NULL;
         P1Dispatch(FALSE);
     }
-    else if(PROC_SIX == 0){
-        PROC_SIX = 1;
-        P1Dispatch(FALSE);
+    else{
+        if(priority < processTable[currentCid].priority){
+            P1Dispatch(FALSE);
+        }
     }
-    // what do we do if process is not 6 and is not first process?
-
     // re-enable interrupts if they were previously enabled
     P1EnableInterrupts();
     return result;
@@ -136,20 +162,32 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
 
 // TODO
 void P1_Quit(int status) {
+    Zombie *temp;
     // check for kernel mode
     checkMode();
     // disable interrupts
     P1DisableInterrupts();
     // remove from ready queue, set status to P1_STATE_QUIT
-    // TODO: Make queue
-    // TODO: Get current ID
+    processTable[currentCid].status = status;
+    // puts currentCid at the head of the parents zombie list
+    temp = malloc(sizeof(Zombie));
+    temp.cid = currentCid;
+    temp.next = processTable[currentCid].parent.zombies.next
+    processTable[currentCid].parent.zombies.next = temp;
+    // decrement the amount of children of the parent
+    processTable[currentCid].parent.numChildren--;
+    // removes active child from parent process array
+    processTable[currentCid].parent.children[currentCid] = -1;
     // if first process verify it doesn't have children, otherwise give children 
     // to first process
+    // TODO: ^^^
+    if(NULL == processTable[currentCid].parent){
 
+    }
     // Store first process as a head so we can always access it?
 
     // add ourself to list of our parent's children that have quit
-    processTable[processTable[currentCid].parent].deadChildren = malloc(sizeof(int));
+    processTable[processTable[currentCid].parent].zombies = malloc(sizeof(int));
     // if parent is in state P1_STATE_JOINING set its state to P1_STATE_READY
 
     P1Dispatch(FALSE);
@@ -157,27 +195,58 @@ void P1_Quit(int status) {
     assert(0);
 }
 
-
-int P1GetChildStatus(int *cpid, int *status) {
+// TODO
+int P1GetChildStatus(int *pid, int *status) {
     int result = P1_SUCCESS;
+    int i;
     // do stuff here
-    return result;
+    if(processTable[currentCid].numChildren == 0){
+        return P1_NO_CHILDREN;
+    }
+    for(i = 0; i < processTable[currentCid].numChildren; i++){
+        if(processTable[currentCid].children[i] == ){
+            processTable[i].state = P1_STATE_FREE;
+            return result;
+        }
+    }
+
+    return P1_NO_QUIT;
 }
 
 int P1SetState(int pid, P1_State state, int lid, int vid) {
     int result = P1_SUCCESS;
     // do stuff here
+    // checks to see if the context was ever created
+    if(processTable[pid].created == 0){
+        return P1_INVALID_PID;
+    }
+    if(state != P1_STATE_BLOCKED || state != P1_STATE_JOINING || state != P1_STATE_QUIT || state != P1_STATE_READY){
+        return P1_INVALID_STATE;
+    }
+    if(state == P1_STATE_JOINING && NULL != processTable[pid].zombies.next){
+        return P1_CHILD_QUIT;
+    }
+    processTable[pid].state = state;
+    P1_ProcInfo.lid = lid;
+    P1_ProcInfo.vid = vid;
+    
     return result;
 }
 
+// TODO
 void P1Dispatch(int rotate){
     // select the highest-priority runnable process
     // call P1ContextSwitch to switch to that process
 }
 
+// TODO: figure out how to find corrent proc
 int P1_GetProcInfo(int pid, P1_ProcInfo *info){
-    int         result = P1_SUCCESS;
+    int result = P1_SUCCESS;
     // fill in info here
+    if(processTable[pid].state == P1_STATE_FREE){
+        return P1_INVALID_PID;
+    }
+    info = P1_ProcInfo;
     return result;
 }
 
@@ -193,6 +262,10 @@ void illegalAction(){
     printf("ERROR: Illegal Action");
 }
 
+void func_wrapper(void *arg){
+    processTable[currentId].func(arg);
+    P1_Quit(status);
+}
 
 
 
