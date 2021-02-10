@@ -18,6 +18,19 @@ void func_wrapper(int (*func)(void*), void *arg);
 // flag to check if the first process has started
 int PROC_SIX = 0;
 
+// temp vals for lid and vid since they are not used in 1b
+int LID = 0;
+int VID = 0;
+
+// global variable that contains head process
+int HEAD;
+
+typedef struct ReadyQ{
+    int             cid;
+    int             priority;
+    int             *next;
+}
+
 typedef struct Zombie{
     int             cid;
     int             *next;
@@ -30,21 +43,24 @@ typedef struct PCB {
     int             priority;           // process's priority
     P1_State        state;              // state of the PCB
     // more fields here
-    int             parent;             // stores parent id
+    int             parent;                         // stores parent id
     int             children[P1_MAXPROC];          // array of children processes
-    int             numChildren;
-    Zombie          *zombies;
+    int             numChildren;        // number of living children
+    Zombie          *zombies;           // array of dead children 
+    int             numZombies;         // tells how many dead children there are (a morbid statistic)
     int             created;            // lets us know if the context exists
-    int             status;             // No clue what it does
-    void            (*func)(void *);
+    int             status;             // status is return of function called with the process
+    void            (*func)(void *);    // seperate func field for wrapper function
 } PCB;
 
 static PCB processTable[P1_MAXPROC];   // the process table
 
+static ReadyQ *readyQueue;             // linked list of readyQs
 
-void P1ProcInit(void)
-{
+// init a process
+void P1ProcInit(void){
     P1ContextInit();
+    // loop through process table and init everything
     for (int i = 0; i < P1_MAXPROC; i++) {
         processTable[i].state = P1_STATE_FREE;
         // initialize the rest of the PCB
@@ -54,11 +70,17 @@ void P1ProcInit(void)
         for(int j = 0; j < P1_MAXPROC; j++){
             processTable[i].children[j] = -1;
         }
+        // malloc zombie head node
+        processTable[i].zombies = malloc(sizeof(Zombie));
+        processTable[i].numZombies = 0;
+        processTable[i].zombies.next = NULL;
     }
-    // initialize everything else
-
+    // init ReadyQ
+    readyQueue = malloc(sizeof(ReadyQ));
+    readyQueue.next = NULL;
 }
 
+// returns the current process id
 int P1_GetPid(void) {
     return currentCid;
 }
@@ -70,6 +92,9 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
     int result = P1_SUCCESS;
     int status;
     int interruptFlag = 0;
+    ReadyQ *temp;
+    ReadyQ *newNode;
+    ReadyQ *prev;
     // check for kernel mode
     checkMode();
     // disable interrupts CHILDREN NEED TO RUN INTERRUPTS
@@ -120,12 +145,13 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
 
     // create a context using P1ContextCreate
     processTable[pid].func = func;
+    // WRAPPER 
     int checker = P1ContextCreate(func_wrapper,arg,stacksize,pid);
     if(checker == P1_TOO_MANY_CONTEXTS){
-        // throw error
+        // TODO throw error
     }
     else if(checker == P1_INVALID_STACK){
-        // throw error
+        // TODO throw error
     }
 
     // allocate and initialize PCB (Process Control Block)
@@ -141,17 +167,41 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
         USLOSS_Halt(status);
     } 
 
+    // add process to ReadyQ
+    // check if first process
+    if(priority == 6){
+        readyQueue = processTable[pid];
+        readyQueue.cid = pid;
+        readyQueue.priority = priority;
+    }
+    // any other process checks for priority 
+    else{
+        // loop through ReadyQ and check for priority
+        temp = readyQueue;
+        while(priority < temp.next.priority || NULL != temp.next){
+            temp = temp.next;                
+        }
+        prev = temp;
+        temp = prev.next;
+        newNode = malloc(sizeof(ReadyQ));
+        prev.next = newNode;
+        newNode.next = temp;
+        newNode.cid = pid;
+        newNode.priority = priority; 
+    }
+
     // if this is the first process or this process's priority is higher than the 
     // currently running process call P1Dispatch(FALSE)
     // first process is process 6. Everything else is between 1-5 and 1 is highest priority
     if(priority == 6 && PROC_SIX == 0){
+        HEAD = pid;
         // launch first process
         PROC_SIX = 1;
-        processTable[currentCid].parent = NULL;
+        processTable[pid].parent = NULL;
         P1Dispatch(FALSE);
     }
     else{
-        if(priority < processTable[currentCid].priority){
+        if(priority < processTable[pid].priority){
             P1Dispatch(FALSE);
         }
     }
@@ -160,59 +210,114 @@ int P1_Fork(char *name, int (*func)(void*), void *arg, int stacksize, int priori
     return result;
 }
 
-// TODO
+// when called, current process will quit. Checks based upon priority to assert first process
+// does not quit with children. Sets any children of quitting process to be children of first process.
 void P1_Quit(int status) {
     Zombie *temp;
+    Zombie *tail;
+    int child;
+    PCB *parent = processTable[processTable[currentCid].parent];
+    PCB *current = processTable[currentCid];
+
     // check for kernel mode
     checkMode();
     // disable interrupts
     P1DisableInterrupts();
+
     // remove from ready queue, set status to P1_STATE_QUIT
-    processTable[currentCid].status = status;
+    current.status = status;
+    
+
     // puts currentCid at the head of the parents zombie list
     temp = malloc(sizeof(Zombie));
-    temp.cid = currentCid;
-    temp.next = processTable[currentCid].parent.zombies.next
-    processTable[currentCid].parent.zombies.next = temp;
-    // decrement the amount of children of the parent
-    processTable[currentCid].parent.numChildren--;
-    // removes active child from parent process array
-    processTable[currentCid].parent.children[currentCid] = -1;
-    // if first process verify it doesn't have children, otherwise give children 
-    // to first process
-    // TODO: ^^^
-    if(NULL == processTable[currentCid].parent){
-
-    }
-    // Store first process as a head so we can always access it?
-
     // add ourself to list of our parent's children that have quit
-    processTable[processTable[currentCid].parent].zombies = malloc(sizeof(int));
-    // if parent is in state P1_STATE_JOINING set its state to P1_STATE_READY
+    temp.cid = currentCid;
+    temp.next = parent.zombies.next;
+    parent.zombies.next = temp;
 
+    // -- live children :  ++ dead children
+    parent.numChildren--;
+    parent.numZombies++;
+
+    // removes active child from parent process array
+    parent.children[currentCid] = -1;
+    
+    // Verify first process does not have children
+    if(current.priority == 6){
+        // if first process has children, halt
+        if(current.numChildren != 0){
+            printf("First process quitting with childre, halting.\n");
+            USLOSS_Halt(1);
+        }
+    }
+    // not first process but has children
+    else if(current.numChildren > 0){
+        // give the children to first process
+        for(child = 0;child < P1_MAXPROC; child++){
+            // if the process exists in the currentCid add it to the HEAD
+            if(current.children[child] != -1){
+                processTable[HEAD].children[child] = current.children[child];
+                current.children[child] = -1;
+            }
+        }
+    }
+
+    // check for dead children
+    if(NULL != processTable[currentCid].zombies.next){
+        // move dead children (FIFO HEAD sets to new zombie head, tail tacked onto old HEAD)
+        temp = processTable[HEAD].zombies.next;
+        tail = current.zombies.next;
+        // loop to tail of new 
+        while(NULL != tail.next){
+            tail = tail.next;
+        }
+        tail.next = temp;
+        processTable[HEAD].zombies.next = current.zombies.next; 
+    }
+
+    // set the state
+    P1SetState(currentCid,P1_STATE_QUIT,LID,VID);
+    // if parent is in state P1_STATE_JOINING set its state to P1_STATE_READY
+    if(parent.state == P1_STATE_JOINING){
+        parent.state = P1_STATE_READY;
+    } 
     P1Dispatch(FALSE);
     // should never get here
     assert(0);
 }
 
-// TODO
+// Returns the status of a given child
+// takes dead child off zombie list and sets state to free for reuse
 int P1GetChildStatus(int *pid, int *status) {
     int result = P1_SUCCESS;
-    int i;
-    // do stuff here
-    if(processTable[currentCid].numChildren == 0){
+    Zombie *deadChild;
+    Zombie *temp;
+    PCB *current = processTable[currentCid];
+    deadChild = current.zombies.next;
+
+    // check if no children
+    if(current.numChildren == 0){
         return P1_NO_CHILDREN;
     }
-    for(i = 0; i < processTable[currentCid].numChildren; i++){
-        if(processTable[currentCid].children[i] == ){
-            processTable[i].state = P1_STATE_FREE;
-            return result;
-        }
+    // check for zombies
+    if(current.numZombies == 0){
+        return P1_NO_QUIT;
     }
-
-    return P1_NO_QUIT;
+    temp = current.zombies;
+    // loop through linked list of dead children until we get to the tail
+    while(NULL != deadChild.next){
+        temp = deadChild;
+        deadChild = deadChild.next;
+    }
+    // delink, set values, and free the dead child
+    temp.next = NULL;
+    pid = deadChild.pid;
+    status = processTable[pid].status;
+    free(deadChild);
+    return result;
 }
 
+// sets a processes state. Multiple error checks
 int P1SetState(int pid, P1_State state, int lid, int vid) {
     int result = P1_SUCCESS;
     // do stuff here
@@ -220,16 +325,17 @@ int P1SetState(int pid, P1_State state, int lid, int vid) {
     if(processTable[pid].created == 0){
         return P1_INVALID_PID;
     }
+    // given state is not legit
     if(state != P1_STATE_BLOCKED || state != P1_STATE_JOINING || state != P1_STATE_QUIT || state != P1_STATE_READY){
         return P1_INVALID_STATE;
     }
+    // check if next child has already quit
     if(state == P1_STATE_JOINING && NULL != processTable[pid].zombies.next){
         return P1_CHILD_QUIT;
     }
     processTable[pid].state = state;
     P1_ProcInfo.lid = lid;
     P1_ProcInfo.vid = vid;
-    
     return result;
 }
 
@@ -237,6 +343,10 @@ int P1SetState(int pid, P1_State state, int lid, int vid) {
 void P1Dispatch(int rotate){
     // select the highest-priority runnable process
     // call P1ContextSwitch to switch to that process
+
+    if(){
+
+    }
 }
 
 // TODO: figure out how to find corrent proc
@@ -263,7 +373,7 @@ void illegalAction(){
 }
 
 void func_wrapper(void *arg){
-    processTable[currentId].func(arg);
+    int status = processTable[currentId].func(arg);
     P1_Quit(status);
 }
 
